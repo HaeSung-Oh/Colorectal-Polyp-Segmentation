@@ -114,10 +114,10 @@ class GLAM(nn.Module):
 
 
 class EfficientNetEncoder(nn.Module):
+    """EfficientNet"""
     def __init__(self, pretrained=True, model_name='efficientnet_v2_s'):
         super(EfficientNetEncoder, self).__init__()
         
-        # EfficientNet 
         if model_name == 'efficientnet_b0':
             try:
                 from torchvision.models import efficientnet_b0
@@ -149,25 +149,28 @@ class EfficientNetEncoder(nn.Module):
             from torchvision.models import efficientnet_v2_s
             backbone = efficientnet_v2_s(pretrained=pretrained)
             
-
         features = list(backbone.features.children())
         
-        self.stage0 = features[0]  # Stem
-        self.stage1 = features[1]  # Stage 1
-        self.stage2 = features[2]  # Stage 2
-        self.stage3 = nn.Sequential(*features[3:5])  # Stage 3
-        self.stage4 = nn.Sequential(*features[5:])   # Stage 4
+        self.stage1 = nn.Sequential(features[0], features[1])  # 24ch, 1/2
+        self.stage2 = features[2]              # 48ch, 1/4
+        self.stage3 = features[3]              # 64ch, 1/8
+        self.stage4 = features[4]              # 128ch, 1/16
+        self.stage5 = nn.Sequential(           # 256ch, 1/32
+            features[5],  # 160ch
+            features[6]   # 256ch
+        )
         
         self._get_feature_channels()
         
     def _get_feature_channels(self):
+       
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, 224, 224)
-            e0 = self.stage0(dummy_input)
-            e1 = self.stage1(e0)
-            e2 = self.stage2(e1)
-            e3 = self.stage3(e2)
-            e4 = self.stage4(e3)
+            e0 = self.stage1(dummy_input)
+            e1 = self.stage2(e0)     # 1/4 size  
+            e2 = self.stage3(e1)     # 1/8 size
+            e3 = self.stage4(e2)     # 1/16 size
+            e4 = self.stage5(e3)     # 1/32 size
             
             self.feature_channels = [
                 e0.shape[1],  # stage0 
@@ -176,16 +179,14 @@ class EfficientNetEncoder(nn.Module):
                 e3.shape[1],  # stage3 
                 e4.shape[1]   # stage4 
             ]
-            
+  
         print(f"EfficientNet feature channels: {self.feature_channels}")
-        
     def forward(self, x):
-
-        e0 = self.stage0(x)      # 1/2 size
-        e1 = self.stage1(e0)     # 1/4 size  
-        e2 = self.stage2(e1)     # 1/8 size
-        e3 = self.stage3(e2)     # 1/16 size
-        e4 = self.stage4(e3)     # 1/32 size
+        e0 = self.stage1(x)      # 1/2 size
+        e1 = self.stage2(e0)     # 1/4 size  
+        e2 = self.stage3(e1)     # 1/8 size
+        e3 = self.stage4(e2)     # 1/16 size
+        e4 = self.stage5(e3)     # 1/32 size
         
         return e0, e1, e2, e3, e4
 
@@ -194,21 +195,18 @@ class DecoderBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels, stride):
         super(DecoderBlock, self).__init__()
 
-        self.upconv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=stride, stride=stride)
+        self.upsample = nn.Upsample(scale_factor=stride, mode='bilinear', align_corners=False)
 
         self.context_module = GLAM(skip_channels)
 
         self.post_fusion = nn.Sequential(
             nn.Conv2d(out_channels + skip_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(out_channels, out_channels, kernel_size=1),
-            nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True)
         )
 
     def forward(self, x, skip):  # skip: e0
-        x = self.upconv(x)
+        x = self.upsample(x)
         
         skip_post = self.context_module(skip) + skip
         if skip_post.shape[2:] != x.shape[2:]:
